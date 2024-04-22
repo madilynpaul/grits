@@ -539,6 +539,7 @@ class CG_System:
             # get compounds
             self._get_compounds(
                 beads=beads,
+                mapping=None,
                 allow_overlap=allow_overlap,
                 length_scale=length_scale,
                 conversion_dict=conversion_dict,
@@ -553,10 +554,21 @@ class CG_System:
                 with open(mapping, "r") as f:
                     mapping = json.load(f)
             self.mapping = mapping
+            self._get_compounds(
+                beads=None,
+                mapping=mapping,
+                allow_overlap=allow_overlap,
+                length_scale=length_scale,
+                conversion_dict=conversion_dict,
+                add_hydrogens=add_hydrogens,
+                aniso_beads=aniso_beads,
+            )
+            self._map_bonds()
 
     def _get_compounds(
         self,
         beads,
+        mapping,
         allow_overlap,
         length_scale,
         conversion_dict,
@@ -594,18 +606,68 @@ class CG_System:
                 length_scale=length_scale,
                 mass_scale=self.mass_scale,
             )
-            self._compounds.append(
-                CG_Compound(
-                    compound=mb_comp,
-                    allow_overlap=allow_overlap,
-                    beads=beads,
-                    add_hydrogens=add_hydrogens,
-                    aniso_beads=aniso_beads,
+            if beads is not None:
+                self._compounds.append(
+                    CG_Compound(
+                        compound=mb_comp,
+                        allow_overlap=allow_overlap,
+                        beads=beads,
+                        add_hydrogens=add_hydrogens,
+                        aniso_beads=aniso_beads,
+                    )
                 )
-            )
+            elif mapping is not None:
+                self._compounds.append(
+                    CG_Compound(
+                        compound=mb_comp,
+                        allow_overlap=allow_overlap,
+                        mapping=mapping,
+                        add_hydrogens=add_hydrogens,
+                        aniso_beads=aniso_beads,
+                    )
+                )
             self._inds.append(
                 [mol_inds[i] for i in np.where(np.array(mol_lengths) == l)[0]]
             )
+    def _map_bonds(self):
+        def shift_value(i):
+            n_before, n_bead = order[types[i]]
+            return (
+                n_comps * n_before
+                + (i - n_before)
+                + comp_idx * n_bead
+                + bead_count
+            )
+
+        v_shift = np.vectorize(shift_value)
+        all_bonds = []
+        bead_count = 0
+        for comp, inds in zip(self._compounds, self._inds):
+
+            # Map bonds
+            p = {p: i for i, p in enumerate(comp.particles())}
+            bond_array = np.array(
+                [
+                    (p[i], p[j]) if p[i] < p[j] else (p[j], p[i])
+                    for (i, j) in comp.bonds()
+                ]
+            )
+
+            types = [p.name for p in comp.particles()]
+            n_comps = len(inds)
+            # Check that bond array exists
+            if bond_array.size > 0:
+                order = {
+                    i: (types.index(i), types.count(i)) for i in set(types)
+                }
+                comp_bonds = []
+                for comp_idx in range(n_comps):
+                    comp_bonds.append(v_shift(bond_array))
+                all_bonds += comp_bonds
+
+        if all_bonds:
+            all_bond_array = np.vstack(all_bonds)
+            self._bond_array = all_bond_array[all_bond_array[:, 0].argsort()]
 
     def _set_mapping(self):
         """Scale the mapping from each compound to the entire trajectory."""
