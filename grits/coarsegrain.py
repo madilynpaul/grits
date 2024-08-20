@@ -521,6 +521,7 @@ class CG_System:
         mass_scale=1.0,
         add_hydrogens=False,
         aniso_beads=False,
+        bond_map = None
     ):
         if (beads is None) == (mapping is None):
             raise ValueError(
@@ -533,12 +534,12 @@ class CG_System:
         self.mass_scale = mass_scale
         self.aniso_beads = aniso_beads
         self.mass_scale = mass_scale
+        self.bond_map = bond_map
 
         if beads is not None:
             # get compounds
             self._get_compounds(
                 beads=beads,
-                mapping=None,
                 allow_overlap=allow_overlap,
                 length_scale=length_scale,
                 conversion_dict=conversion_dict,
@@ -553,21 +554,10 @@ class CG_System:
                 with open(mapping, "r") as f:
                     mapping = json.load(f)
             self.mapping = mapping
-            self._get_compounds(
-                beads=None,
-                mapping=mapping,
-                allow_overlap=allow_overlap,
-                length_scale=length_scale,
-                conversion_dict=conversion_dict,
-                add_hydrogens=add_hydrogens,
-                aniso_beads=aniso_beads,
-            )
-            self._map_bonds()
 
     def _get_compounds(
         self,
         beads,
-        mapping,
         allow_overlap,
         length_scale,
         conversion_dict,
@@ -585,7 +575,7 @@ class CG_System:
                 conversion_dict[i].symbol for i in snap.particles.types
             ]
         # Break apart the snapshot into separate molecules
-        molecules = get_molecule_cluster(snap=snap)
+        molecules = snap_molecules(snap)
         mol_inds = []
         for i in range(max(molecules) + 1):
             mol_inds.append(np.where(molecules == i)[0])
@@ -605,68 +595,18 @@ class CG_System:
                 length_scale=length_scale,
                 mass_scale=self.mass_scale,
             )
-            if beads is not None:
-                self._compounds.append(
-                    CG_Compound(
-                        compound=mb_comp,
-                        allow_overlap=allow_overlap,
-                        beads=beads,
-                        add_hydrogens=add_hydrogens,
-                        aniso_beads=aniso_beads,
-                    )
+            self._compounds.append(
+                CG_Compound(
+                    compound=mb_comp,
+                    allow_overlap=allow_overlap,
+                    beads=beads,
+                    add_hydrogens=add_hydrogens,
+                    aniso_beads=aniso_beads,
                 )
-            elif mapping is not None:
-                self._compounds.append(
-                    CG_Compound(
-                        compound=mb_comp,
-                        allow_overlap=allow_overlap,
-                        mapping=mapping,
-                        add_hydrogens=add_hydrogens,
-                        aniso_beads=aniso_beads,
-                    )
-                )
+            )
             self._inds.append(
                 [mol_inds[i] for i in np.where(np.array(mol_lengths) == l)[0]]
             )
-    def _map_bonds(self):
-        def shift_value(i):
-            n_before, n_bead = order[types[i]]
-            return (
-                n_comps * n_before
-                + (i - n_before)
-                + comp_idx * n_bead
-                + bead_count
-            )
-
-        v_shift = np.vectorize(shift_value)
-        all_bonds = []
-        bead_count = 0
-        for comp, inds in zip(self._compounds, self._inds):
-
-            # Map bonds
-            p = {p: i for i, p in enumerate(comp.particles())}
-            bond_array = np.array(
-                [
-                    (p[i], p[j]) if p[i] < p[j] else (p[j], p[i])
-                    for (i, j) in comp.bonds()
-                ]
-            )
-
-            types = [p.name for p in comp.particles()]
-            n_comps = len(inds)
-            # Check that bond array exists
-            if bond_array.size > 0:
-                order = {
-                    i: (types.index(i), types.count(i)) for i in set(types)
-                }
-                comp_bonds = []
-                for comp_idx in range(n_comps):
-                    comp_bonds.append(v_shift(bond_array))
-                all_bonds += comp_bonds
-
-        if all_bonds:
-            all_bond_array = np.vstack(all_bonds)
-            self._bond_array = all_bond_array[all_bond_array[:, 0].argsort()]
 
     def _set_mapping(self):
         """Scale the mapping from each compound to the entire trajectory."""
@@ -841,4 +781,406 @@ class CG_System:
                     if self.aniso_beads:
                         new_snap.particles.orientation = orientation
                     new_snap = identify_snapshot_connections(new_snap)
+                    
+                if self.bond_map is not None:
+                    new_snap.bonds.N = len(self.bond_map)
+                    new_snap.bonds.group = self.bond_map
+                    #new_snap.bonds.typeid = np.array(bond_ids)
+                    #if bond_types is not None:
+                    #    new_snap.bonds.types = np.array(bond_types)
+                    #else:
+                    #    new_snap.bonds.types = None
+                    #new_snap.bonds.type_shapes = bond_type_shapes
+                    if self.aniso_beads:
+                        new_snap.particles.orientation = orientation
+                    new_snap = identify_snapshot_connections(new_snap)
+                    
                 new.append(new_snap)
+
+
+#class CG_System:
+#    """Coarse-grained System.
+#
+#    Coarse-grained mapping can be specified using SMARTS grammar or the indices
+#    of particles.
+#
+#    Parameters
+#    ----------
+#    gsdfile : path
+#        Path to a gsd file.
+#    beads : dict, default None
+#        Dictionary with keys containing desired bead name and values containing
+#        SMARTS string specification of that bead. For example::
+#
+#            beads = {"_B": "c1sccc1", "_S": "CCC"}
+#
+#        would map a ``"_B"`` bead to any thiophene moiety (``"c1sccc1"``) found
+#        in the compound and an ``"_S"`` bead to a propyl moiety (``"CCC"``).
+#        User must provide only one of beads or mapping.
+#    mapping : dict or path, default None
+#        Either a dictionary or path to a json file of a dictionary. Dictionary
+#        keys contain desired bead name and SMARTS string specification of that
+#        bead and values containing list of lists of atom indices::
+#
+#            mapping = {"_B...c1sccc1": [[0, 4, 3, 2, 1], ...]}
+#
+#        User must provide only one of beads or mapping.
+#        If a mapping is provided, the bonding between the beads will not be set.
+#    allow_overlap : bool, default False,
+#        Whether to allow beads representing ring structures to share atoms.
+#    conversion_dict : dictionary, default None
+#        Dictionary to map particle types to their element.
+#    length_scale : float, default 1.0
+#        Factor by which to scale length values.
+#    mass__scale : float, default 1.0
+#        Factor by which to scale mass values.
+#    add_hydrogens : bool, default False
+#        Whether to add hydrogens. Useful for united-atom models.
+#    aniso_beads : bool, default False
+#        Whether to calculate orientations for anisotropic beads.
+#        Note: Bead sizes should be fitted during paramaterization.
+#        These are not calculated here.
+#
+#    Attributes
+#    ----------
+#    mapping : dict
+#        A mapping from atomistic to coarse-grain structure. Dictionary keys are
+#        the bead name and SMARTS string (separated by "..."), and the values are
+#        a list of numpy arrays of fine-grain particle indices for each bead
+#        instance::
+#
+#            {"_B...c1sccc1": [np.array([0, 4, 3, 2, 1]), ...], ...}
+#    """
+#
+#    def __init__(
+#        self,
+#        gsdfile,
+#        beads=None,
+#        mapping=None,
+#        allow_overlap=False,
+#        conversion_dict=None,
+#        length_scale=1.0,
+#        mass_scale=1.0,
+#        add_hydrogens=False,
+#        aniso_beads=False,
+#    ):
+#        if (beads is None) == (mapping is None):
+#            raise ValueError(
+#                "Please provide only one of either beads or mapping."
+#            )
+#        self.gsdfile = gsdfile
+#        self._compounds = []
+#        self._inds = []
+#        self._bond_array = None
+#        self.mass_scale = mass_scale
+#        self.aniso_beads = aniso_beads
+#        self.mass_scale = mass_scale
+#
+#        if beads is not None:
+#            # get compounds
+#            self._get_compounds(
+#                beads=beads,
+#                mapping=None,
+#                allow_overlap=allow_overlap,
+#                length_scale=length_scale,
+#                conversion_dict=conversion_dict,
+#                add_hydrogens=add_hydrogens,
+#                aniso_beads=aniso_beads,
+#            )
+#
+#            # calculate the bead mappings for the entire trajectory
+#            self._set_mapping()
+#        elif mapping is not None:
+#            if not isinstance(mapping, dict):
+#                with open(mapping, "r") as f:
+#                    mapping = json.load(f)
+#            self.mapping = mapping
+#            self._get_compounds(
+#                beads=None,
+#                mapping=mapping,
+#                allow_overlap=allow_overlap,
+#                length_scale=length_scale,
+#                conversion_dict=conversion_dict,
+#                add_hydrogens=add_hydrogens,
+#                aniso_beads=aniso_beads,
+#            )
+#            self._map_bonds()
+#
+#    def _get_compounds(
+#        self,
+#        beads,
+#        mapping,
+#        allow_overlap,
+#        length_scale,
+#        conversion_dict,
+#        add_hydrogens,
+#        aniso_beads,
+#    ):
+#        """Get compounds for each molecule type in the gsd trajectory."""
+#        # Use the first frame to find the coarse-grain mapping
+#        with gsd.hoomd.open(self.gsdfile) as t:
+#            snap = t[0]
+#
+#        # Use the conversion dictionary to map particle type to element symbol
+#        if conversion_dict is not None:
+#            snap.particles.types = [
+#                conversion_dict[i].symbol for i in snap.particles.types
+#            ]
+#        # Break apart the snapshot into separate molecules
+#        molecules = get_molecule_cluster(snap=snap)
+#        mol_inds = []
+#        for i in range(max(molecules) + 1):
+#            mol_inds.append(np.where(molecules == i)[0])
+#
+#        # If molecule length is different, it will be assumed to be different
+#        mol_lengths = [len(i) for i in mol_inds]
+#        uniq_mol_inds = []
+#        for l in set(mol_lengths):
+#            uniq_mol_inds.append(mol_inds[mol_lengths.index(l)])
+#
+#        # Convert each unique molecule to a compound
+#        for inds in uniq_mol_inds:
+#            l = len(inds)
+#            mb_comp = comp_from_snapshot(
+#                snapshot=snap,
+#                indices=inds,
+#                length_scale=length_scale,
+#                mass_scale=self.mass_scale,
+#            )
+#            if beads is not None:
+#                self._compounds.append(
+#                    CG_Compound(
+#                        compound=mb_comp,
+#                        allow_overlap=allow_overlap,
+#                        beads=beads,
+#                        add_hydrogens=add_hydrogens,
+#                        aniso_beads=aniso_beads,
+#                    )
+#                )
+#            elif mapping is not None:
+#                self._compounds.append(
+#                    CG_Compound(
+#                        compound=mb_comp,
+#                        allow_overlap=allow_overlap,
+#                        mapping=mapping,
+#                        add_hydrogens=add_hydrogens,
+#                        aniso_beads=aniso_beads,
+#                    )
+#                )
+#            self._inds.append(
+#                [mol_inds[i] for i in np.where(np.array(mol_lengths) == l)[0]]
+#            )
+#    def _map_bonds(self):
+#        def shift_value(i):
+#            n_before, n_bead = order[types[i]]
+#            return (
+#                n_comps * n_before
+#                + (i - n_before)
+#                + comp_idx * n_bead
+#                + bead_count
+#            )
+#
+#        v_shift = np.vectorize(shift_value)
+#        all_bonds = []
+#        bead_count = 0
+#        for comp, inds in zip(self._compounds, self._inds):
+#
+#            # Map bonds
+#            p = {p: i for i, p in enumerate(comp.particles())}
+#            bond_array = np.array(
+#                [
+#                    (p[i], p[j]) if p[i] < p[j] else (p[j], p[i])
+#                    for (i, j) in comp.bonds()
+#                ]
+#            )
+#
+#            types = [p.name for p in comp.particles()]
+#            n_comps = len(inds)
+#            # Check that bond array exists
+#            if bond_array.size > 0:
+#                order = {
+#                    i: (types.index(i), types.count(i)) for i in set(types)
+#                }
+#                comp_bonds = []
+#                for comp_idx in range(n_comps):
+#                    comp_bonds.append(v_shift(bond_array))
+#                all_bonds += comp_bonds
+#
+#        if all_bonds:
+#            all_bond_array = np.vstack(all_bonds)
+#            self._bond_array = all_bond_array[all_bond_array[:, 0].argsort()]
+#
+#    def _set_mapping(self):
+#        """Scale the mapping from each compound to the entire trajectory."""
+#
+#        def shift_value(i):
+#            n_before, n_bead = order[types[i]]
+#            return (
+#                n_comps * n_before
+#                + (i - n_before)
+#                + comp_idx * n_bead
+#                + bead_count
+#            )
+#
+#        v_shift = np.vectorize(shift_value)
+#
+#        self.mapping = {}
+#        all_bonds = []
+#        bead_count = 0
+#        for comp, inds in zip(self._compounds, self._inds):
+#            # Map particles
+#            for k, v in comp.mapping.items():
+#                self.mapping[k] = [i[list(g)] for i in inds for g in v]
+#
+#            # Map bonds
+#            p = {p: i for i, p in enumerate(comp.particles())}
+#            bond_array = np.array(
+#                [
+#                    (p[i], p[j]) if p[i] < p[j] else (p[j], p[i])
+#                    for (i, j) in comp.bonds()
+#                ]
+#            )
+#
+#            types = [p.name for p in comp.particles()]
+#            n_comps = len(inds)
+#            # Check that bond array exists
+#            if bond_array.size > 0:
+#                order = {
+#                    i: (types.index(i), types.count(i)) for i in set(types)
+#                }
+#                comp_bonds = []
+#                for comp_idx in range(n_comps):
+#                    comp_bonds.append(v_shift(bond_array))
+#                all_bonds += comp_bonds
+#            bead_count += n_comps * len(types)
+#
+#        if all_bonds:
+#            all_bond_array = np.vstack(all_bonds)
+#            self._bond_array = all_bond_array[all_bond_array[:, 0].argsort()]
+#
+#    def save_mapping(self, filename):
+#        """Save the mapping operator to a json file.
+#
+#        Parameters
+#        ----------
+#        filename : str
+#            Filename where the mapping operator will be saved in json format.
+#        """
+#        with open(filename, "w") as f:
+#            json.dump(self.mapping, f, cls=NumpyEncoder)
+#        print(f"Mapping saved to {filename}")
+#
+#    def save(self, cg_gsdfile, start=0, stop=None, stride=1):
+#        """Save the coarse-grain system to a gsd file.
+#
+#        Does not calculate the image of the coarse-grain bead.
+#
+#        Retains:
+#            - configuration: box, step
+#            - particles: N, position, typeid, types
+#            - bonds: N, group, typeid, types
+#
+#        Parameters
+#        ----------
+#        cg_gsdfile : str
+#            Filename for new gsd file. If file already exists, it will be
+#            overwritten.
+#        start : int, default 0
+#            Where to start reading the gsd trajectory the system was created
+#            with.
+#        stop : int, default None
+#            Where to stop reading the gsd trajectory the system was created
+#            with. If None, will stop at the last frame.
+#        stride : int, default 1
+#            The step size to use when iterating through start:stop
+#        """
+#        typeid = []
+#        types = [i.split("...")[0] for i in self.mapping]
+#        for i, inds in enumerate(self.mapping.values()):
+#            typeid.append(np.ones(len(inds)) * i)
+#        typeid = np.hstack(typeid)
+#
+#        # Set up bond information if it exists
+#        bond_types = []
+#        bond_ids = []
+#        # Todo: Fill this if we need to
+#        bond_type_shapes = None
+#        N_bonds = 0
+#        if self._bond_array is not None:
+#            N_bonds = self._bond_array.shape[0]
+#            for bond in self._bond_array:
+#                bond_pair = "-".join(
+#                    [
+#                        types[int(typeid[int(bond[0])])],
+#                        types[int(typeid[int(bond[1])])],
+#                    ]
+#                )
+#                if bond_pair not in bond_types:
+#                    bond_types.append(bond_pair)
+#                _id = np.where(np.array(bond_types) == bond_pair)[0]
+#                bond_ids.append(_id)
+#        else:
+#            bond_types = None
+#
+#        with gsd.hoomd.open(cg_gsdfile, "w") as new, gsd.hoomd.open(
+#            self.gsdfile, "r"
+#        ) as old:
+#            # stop being None is fine; slicing [0:None] gives whole array,
+#            # even in edge case where there's only one or two frames
+#            for s in old[start:stop:stride]:
+#                new_snap = gsd.hoomd.Frame()
+#                position = []
+#                mass = []
+#                orientation = [] if self.aniso_beads else None
+#                f_box = freud.Box.from_box(s.configuration.box)
+#                unwrap_pos = f_box.unwrap(
+#                    s.particles.position, s.particles.image
+#                )
+#                for i, inds in enumerate(self.mapping.values()):
+#                    position += [np.mean(unwrap_pos[x], axis=0) for x in inds]
+#
+#                    mass += [
+#                        sum(s.particles.mass[x]) * self.mass_scale for x in inds
+#                    ]
+#                    if self.aniso_beads:
+#                        for x in inds:
+#                            masses = s.particles.mass[x] * self.mass_scale
+#                            hmass = element_from_symbol("H").mass
+#                            positions = s.particles.position[x]
+#                            heavy_positions = positions[
+#                                np.where(masses > hmass)
+#                            ]
+#                            major_axis, ab_idxs = get_major_axis(
+#                                heavy_positions
+#                            )
+#                            orientation.append(get_quaternion(major_axis))
+#
+#                if self.aniso_beads:
+#                    orientation = np.vstack(orientation)
+#                    new_snap.particles.orientation = orientation
+#                position = np.vstack(position)
+#                images = f_box.get_images(position)
+#                position = f_box.wrap(position)
+#
+#                new_snap.configuration.box = s.configuration.box
+#                new_snap.configuration.step = s.configuration.step
+#                new_snap.particles.N = len(typeid)
+#                new_snap.particles.position = position
+#                new_snap.particles.image = images
+#                new_snap.particles.typeid = typeid.astype(int)
+#                new_snap.particles.types = types
+#                new_snap.particles.mass = mass
+#
+#                if N_bonds > 0:
+#                    new_snap.bonds.N = N_bonds
+#                    new_snap.bonds.group = self._bond_array
+#                    new_snap.bonds.typeid = np.array(bond_ids)
+#                    if bond_types is not None:
+#                        new_snap.bonds.types = np.array(bond_types)
+#                    else:
+#                        new_snap.bonds.types = None
+#                    new_snap.bonds.type_shapes = bond_type_shapes
+#                    if self.aniso_beads:
+#                        new_snap.particles.orientation = orientation
+#                    new_snap = identify_snapshot_connections(new_snap)
+#                new.append(new_snap)
